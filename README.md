@@ -1,109 +1,65 @@
-# Financial Statement Analyzer
+# FinFormer
 
-I'm building a model to see how well it can learn about company financial
-health from historical statements without relying on hand-picked ratios.
+I use raw balance sheet, income statement, and cashflow data to test whether models can learn financial signals without hand-made ratios. The notebook compares single-year baselines with three-year LSTM and XGBoost models.
 
-## What this project is
+## Why I built this
 
-Many financial ML models start with hand-built ratios like debt-to-equity,
-current ratio, or return on assets. I'm trying a different approach: give
-the model the balance sheet, income statement, and cashflow data directly
-and see which relationships it can learn.
-
-I'm starting with simple baselines. After that, I want to try an LSTM and
-eventually a Transformer that learns embeddings for financial accounts.
-The idea is similar to how BERT learns word embeddings, but applied to
-balance sheet line items.
-
-I plan to build the LSTM and later neural models in PyTorch. I'm also
-working on a custom tensor and autograd library in C in a separate repo
-called AutoGrad. I hope to use it as a lower-level backend later.
+I wanted to see whether a model could use the statements directly, and whether keeping several years together helps predict a change in liabilities.
 
 ## Data
 
-I use SimFin's free US annual filings from 2020 through 2025. The balance
-sheet, income statement, and cashflow tables are joined on SimFinId and
-Fiscal Year:
-- Balance sheet: 13 features after the 15% missing-value filter
-- Income statement: 8 features
-- Cashflow statement: 7 features
-
-The merged data has about 16,000 company-year rows and 36 features.
-
-I fill missing values in this order:
-1. Company mean across years, so each company's scale is kept
-2. Industry median, to account for differences between sectors
-3. Global median, for anything still missing
-
-For sequence models, I plan to use forward fill or interpolation so the
-data keeps more of its year-to-year movement.
+The pipeline loads annual US statements from SimFin. The notebook has 12,345 labeled rows from 2020 to 2024 and uses 34 statement features in its sequence windows. It joins tables by `SimFinId` and `Fiscal Year`, drops statement columns at or above the 15% missing-to-observed cutoff, then fills missing values with company means, industry medians, and global medians, in that order.
 
 ## Prediction target
 
-The target is binary: did a company's Total Liabilities increase the
-following year?
-- 1 = debt increased
-- 0 = debt stayed flat or decreased
+Class 1 means Total Liabilities increase in the next reported year. I sort by company and year, shift liabilities within each company, preserve missing next-year values, and drop those rows.
 
-I sort rows by SimFinId and Fiscal Year, then use `shift(-1)` to compare
-each year's Total Liabilities with the next one. If a company has no
-following filing, its target stays missing and the row is dropped.
+## How I evaluate
 
-## Baseline result
+I split by time, training on years before 2023 and testing on 2023 onward. I focus on recall for class 1 to track how many increases the model catches. Precision and accuracy are also reported. In the sequence test windows, 55% of labels are 1, so always predicting 1 gives 0.55 accuracy.
 
-My current logistic regression uses `class_weight="balanced"`. It gets
-0.53 recall for debt increases on the training years (2020–2023) and
-0.46 on the held-out 2024 rows. That seven-point gap suggests some
-overfitting, but the model still generalizes reasonably for a linear
-model using one year's data at a time.
+## Stage 1: single-year baselines
 
-Test precision for debt increases is 0.70. There are 99 positive labels
-in the 160 test rows. Since the model sees one snapshot at a time, it
-can't learn how a company's accounts change from year to year.
+The saved logistic regression report has 0.52 training recall and 0.45 test recall for increases, with 0.54 test accuracy. XGBoost has 0.90 training recall and 0.71 test recall, with 0.59 test accuracy. These are row-level results and are separate from the sequence comparison below.
 
-This is a small test set, so the result could change with more labeled
-years. One reason I want to try sequence models is to see how a
-company's financial history adds useful signal.
+## Stage 2: three-year windows
 
-## Time-split and target-label limitation
+Each window has three consecutive years and 34 features per year. Its label asks whether liabilities increase after the window's final year. The notebook makes 2,280 training windows and 2,280 held-out windows. It applies a signed log transform, then standardizes with training-window statistics.
 
-My statements cover 2020 through 2025. I train on labeled rows from
-2020-2023. The test split starts in 2024, but it currently has 160
-labeled rows from 2024 and none from 2025.
+## Stage 3: LSTM and XGBoost results
 
-The target needs a following-year filing. Rows without one keep a
-missing target and are excluded. That leaves a much smaller test set
-than training set, so I want to be careful when reading the result.
+Both LSTM configs use 16 hidden units and 40 epochs across five runs. The regularized config adds 0.3 dropout and 0.001 weight decay. XGBoost uses the same windows flattened to 102 features and is run once.
 
-An LSTM could use a company's financial history, but I'll still need
-enough later filings to make a useful test set.
+| Model | Train accuracy | Test accuracy | Test precision | Test recall |
+|---|---:|---:|---:|---:|
+| LSTM, old config, five runs | 0.707 | 0.568 +/- 0.005 | 0.628 +/- 0.006 | 0.528 +/- 0.024 |
+| LSTM, regularized config, five runs | 0.641 | 0.559 +/- 0.003 | 0.626 +/- 0.006 | 0.495 +/- 0.013 |
+| XGBoost, one run | not reported | 0.58 | 0.62 | 0.62 |
+| Always predict 1 | not applicable | 0.55 | 0.55 | 1.00 |
 
-## Roadmap
+## What I found
 
-- [x] Data pipeline (SimFin, merge, imputation, target derivation)
-- [x] Logistic regression baseline
-- [ ] XGBoost baseline
-- [ ] Simple feedforward neural network baseline
-- [ ] LSTM sequence model (multiple years per company as input)
-- [ ] Transformer with learned account embeddings
-- [ ] Self-supervised pretraining (masked financial value reconstruction)
-- [ ] Port to custom C autograd engine once tensor implementation is stable
+The LSTM scores are close to the 0.55 always-positive accuracy baseline. XGBoost has similar accuracy and higher class 1 recall in its single run. The regularized LSTM has lower training accuracy, but its test scores do not improve in these runs.
+
+## Mistakes I made and fixed
+
+A boolean comparison with a missing next-year value can label that row false. I now preserve the missing target and drop the row before converting labels to integers. I also set each seed before creating the LSTM so it controls the initial weights.
+
+## Limitations
+
+The test covers one later period, and neighboring windows overlap. Mean and median imputation uses information across years.
+
+## Upcoming
+
+- New Data
+- Transformer implementation. Once, new data is in.
 
 ## Setup
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-# add your SimFin API key to .env
-python src/pipeline.py
-```
-
-Requires a free SimFin API key from simfin.com.
+Install `requirements.txt`, copy `.env.example` to `.env`, add a SimFin API key as `SIM_FIN`, then run `python src/pipeline.py`. The baseline and sequence experiments are in `notebooks/01_baseline.ipynb`.
 
 ## Project layout
 
-```
-src/pipeline.py: pulls and filters SimFin data, then saves the CSVs
-notebooks/01_baseline: prepares features, trains the baseline, and evaluates it
-data/: generated CSV files, ignored by Git
-```
+- `src/pipeline.py`: loads and combines SimFin tables
+- `notebooks/01_baseline.ipynb`: data preparation, baselines, sequence models, and evaluation
+- `data/`: generated CSV files
